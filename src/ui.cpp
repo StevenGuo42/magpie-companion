@@ -1,6 +1,7 @@
 #include "ui.h"
 
 #include <lvgl.h>
+#include <string.h>
 
 #include <algorithm>
 
@@ -67,9 +68,12 @@ lv_obj_t* mix_segments[4] = {};
 struct UsageRow {
   lv_obj_t* name;
   lv_obj_t* value;
-  lv_obj_t* track;
+  lv_obj_t* track;  // bar view
   lv_obj_t* fill;
+  lv_obj_t* chart;  // trend view
   lv_obj_t* reset;
+  uint8_t left;
+  uint8_t trend[kTrendPoints];
 };
 lv_obj_t* usage_provider_label = nullptr;
 lv_obj_t* usage_empty_label = nullptr;
@@ -168,6 +172,24 @@ void refreshPageDots() {
 
 void updatePageDots(lv_event_t*) {
   refreshPageDots();
+}
+
+// The tiles stop at both ends, so a swipe past one is a gesture rather than
+// a scroll: it goes round to the other end, as the right button does.
+void wrapPages(lv_event_t*) {
+  const lv_dir_t swipe = lv_indev_get_gesture_dir(lv_indev_get_act());
+  lv_obj_t* active = lv_tileview_get_tile_act(tileview);
+  lv_obj_t* target =
+      swipe == LV_DIR_LEFT && active == pages[kPageCount - 1] ? pages[0]
+      : swipe == LV_DIR_RIGHT && active == pages[0] ? pages[kPageCount - 1]
+                                                    : nullptr;
+  if (target != nullptr) {
+    lv_obj_set_tile(tileview, target, LV_ANIM_ON);
+    refreshPageDots();
+  }
+  // The rest of any swipe is ignored: after a wrap it would scroll the pages
+  // back, and an up or down swipe would end as a tap (Usage: switch view).
+  lv_indev_wait_release(lv_indev_get_act());
 }
 
 void dispatchAction(lv_event_t* event) {
@@ -316,6 +338,54 @@ void createContextPage(lv_obj_t* page) {
   lv_obj_set_pos(context_reasoning_label, 251, 338);
 }
 
+// Dashed: even use, from 100% left at the cycle's start to 0% at its reset.
+// Solid: the percent left as Magpie read it, from 100% at the cycle's start.
+// Blank without readings.
+void drawTrend(lv_event_t* event) {
+  const UsageRow& row =
+      *static_cast<const UsageRow*>(lv_event_get_user_data(event));
+  if (std::all_of(row.trend, row.trend + kTrendPoints,
+                  [](uint8_t left) { return left == kNoReading; })) {
+    return;
+  }
+  lv_area_t area;
+  lv_obj_get_content_coords(lv_event_get_target(event), &area);
+  const int width = lv_area_get_width(&area) - 1;
+  const int height = lv_area_get_height(&area) - 1;
+  auto point = [&](int x, int y) {
+    return lv_point_t{static_cast<lv_coord_t>(area.x1 + x),
+                      static_cast<lv_coord_t>(area.y1 + y)};
+  };
+  lv_draw_ctx_t* draw_ctx = lv_event_get_draw_ctx(event);
+  lv_draw_line_dsc_t line;
+  lv_draw_line_dsc_init(&line);
+  line.color = color(kMuted);
+  line.width = 1;
+  // LVGL 8 dashes only level lines, so the slope is drawn in pieces.
+  for (int x = 0; x < width; x += 10) {
+    const int end = std::min(x + 5, width);
+    const lv_point_t a = point(x, height * x / width);
+    const lv_point_t b = point(end, height * end / width);
+    lv_draw_line(draw_ctx, &line, &a, &b);
+  }
+
+  line.color = color(quotaColor(row.left));
+  line.width = 2;
+  line.round_start = 1;
+  line.round_end = 1;
+  auto reading = [&](int i) {
+    return point(width * i / (kTrendPoints - 1),
+                 height * (100 - row.trend[i]) / 100);
+  };
+  for (int i = 1; i < kTrendPoints; ++i) {
+    if (row.trend[i - 1] != kNoReading && row.trend[i] != kNoReading) {
+      const lv_point_t a = reading(i - 1);
+      const lv_point_t b = reading(i);
+      lv_draw_line(draw_ctx, &line, &a, &b);
+    }
+  }
+}
+
 void createUsagePage(lv_obj_t* page) {
   lv_obj_t* title = createLabel(page, "USAGE", &lv_font_montserrat_18, kGreen);
   lv_obj_set_pos(title, 24, 8);
@@ -327,20 +397,20 @@ void createUsagePage(lv_obj_t* page) {
   lv_obj_add_event_cb(
       usage_provider_label, dispatchAction, LV_EVENT_CLICKED,
       reinterpret_cast<void*>(static_cast<uintptr_t>(UiAction::kNextProvider)));
+  // Tapping anywhere else switches between bars and trends.
+  lv_obj_add_event_cb(
+      page, dispatchAction, LV_EVENT_CLICKED,
+      reinterpret_cast<void*>(static_cast<uintptr_t>(UiAction::kToggleUsageView)));
 
-  for (uint8_t i = 0; i < kMaxWindows; ++i) {
-    const int y = 50 + i * 78;
-    UsageRow& row = usage_rows[i];
+  // Placed by updateUsagePage, which knows how many windows share the page.
+  for (UsageRow& row : usage_rows) {
     row.name = createLabel(page, "-", &lv_font_montserrat_18, kMuted);
-    lv_obj_set_pos(row.name, 24, y);
     lv_obj_set_width(row.name, 270);
     lv_label_set_long_mode(row.name, LV_LABEL_LONG_DOT);
     row.value = createLabel(page, "--", &lv_font_montserrat_24, kWhite);
-    lv_obj_align(row.value, LV_ALIGN_TOP_RIGHT, -24, y - 4);
 
     row.track = lv_obj_create(page);
     lv_obj_remove_style_all(row.track);
-    lv_obj_set_pos(row.track, 24, y + 28);
     lv_obj_set_size(row.track, 432, 10);
     lv_obj_set_style_radius(row.track, 5, LV_PART_MAIN);
     lv_obj_set_style_bg_color(row.track, color(kTrack), LV_PART_MAIN);
@@ -351,8 +421,20 @@ void createUsagePage(lv_obj_t* page) {
     lv_obj_set_style_radius(row.fill, 5, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(row.fill, LV_OPA_COVER, LV_PART_MAIN);
 
-    row.reset = createLabel(page, "", &lv_font_montserrat_18, kMuted);
-    lv_obj_set_pos(row.reset, 24, y + 44);
+    row.chart = lv_obj_create(page);
+    lv_obj_remove_style_all(row.chart);
+    lv_obj_set_width(row.chart, 432);
+    lv_obj_set_style_radius(row.chart, 6, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(row.chart, color(kPanel), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(row.chart, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(row.chart, 4, LV_PART_MAIN);
+    lv_obj_add_event_cb(row.chart, drawTrend, LV_EVENT_DRAW_MAIN, &row);
+    // Taps on the bars and charts go through to the page.
+    for (lv_obj_t* part : {row.track, row.fill, row.chart}) {
+      lv_obj_clear_flag(part, LV_OBJ_FLAG_CLICKABLE);
+    }
+
+    row.reset = createLabel(page, "", &lv_font_montserrat_14, kMuted);
   }
   usage_empty_label =
       createLabel(page, "NO QUOTA DATA", &lv_font_montserrat_18, kMuted);
@@ -360,7 +442,7 @@ void createUsagePage(lv_obj_t* page) {
 }
 
 void updateUsagePage(const AppState& state, uint32_t elapsed_seconds,
-                     uint8_t provider) {
+                     uint8_t provider, bool trends) {
   const ProviderQuota* quota =
       provider < state.provider_count ? &state.providers[provider] : nullptr;
   if (quota == nullptr) {
@@ -377,11 +459,18 @@ void updateUsagePage(const AppState& state, uint32_t elapsed_seconds,
   }
 
   const uint64_t now = state.unix_time + elapsed_seconds;
+  // Trends share the page: the more windows, the flatter the charts.
+  const int pitch = !trends ? 78
+                    : quota != nullptr && quota->window_count > 0
+                        ? 316 / quota->window_count
+                        : 0;
   for (uint8_t i = 0; i < kMaxWindows; ++i) {
-    const UsageRow& row = usage_rows[i];
+    UsageRow& row = usage_rows[i];
     const bool shown = quota != nullptr && i < quota->window_count;
-    for (lv_obj_t* part : {row.name, row.value, row.track, row.reset}) {
-      if (shown) {
+    lv_obj_t* other_view = trends ? row.track : row.chart;
+    for (lv_obj_t* part :
+         {row.name, row.value, row.track, row.chart, row.reset}) {
+      if (shown && part != other_view) {
         lv_obj_clear_flag(part, LV_OBJ_FLAG_HIDDEN);
       } else {
         lv_obj_add_flag(part, LV_OBJ_FLAG_HIDDEN);
@@ -391,13 +480,34 @@ void updateUsagePage(const AppState& state, uint32_t elapsed_seconds,
       continue;
     }
 
+    const int y = 50 + i * pitch;
+    lv_obj_set_pos(row.name, 24, y);
+    lv_obj_align(row.value, LV_ALIGN_TOP_RIGHT, -24, y - 4);
+    if (trends) {
+      const int chart_height = pitch - 58;  // 28 above it, 30 below
+      lv_obj_set_pos(row.chart, 24, y + 28);
+      lv_obj_set_height(row.chart, chart_height);
+      // Under the chart's right end, where the cycle resets.
+      styleLabel(row.reset, &lv_font_montserrat_14, kMuted);
+      lv_obj_align(row.reset, LV_ALIGN_TOP_RIGHT, -24, y + 32 + chart_height);
+    } else {
+      lv_obj_set_pos(row.track, 24, y + 28);
+      styleLabel(row.reset, &lv_font_montserrat_18, kMuted);
+      lv_obj_align(row.reset, LV_ALIGN_TOP_LEFT, 24, y + 44);
+    }
+
     const QuotaWindow& window = quota->windows[i];
     const uint8_t left = window.remaining_percent;
     lv_label_set_text(row.name, window.name);
     lv_label_set_text_fmt(row.value, "%u%% LEFT", left);
     lv_obj_set_width(row.fill, 432 * left / 100);
-    lv_obj_set_style_bg_color(
-        row.fill, color(quotaColor(left)), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(row.fill, color(quotaColor(left)), LV_PART_MAIN);
+    if (row.left != left ||
+        memcmp(row.trend, window.trend, sizeof(row.trend)) != 0) {
+      row.left = left;
+      memcpy(row.trend, window.trend, sizeof(row.trend));
+      lv_obj_invalidate(row.chart);
+    }
     if (state.time_valid && window.resets_at > now) {
       lv_label_set_text_fmt(
           row.reset, "RESETS IN %s",
@@ -462,6 +572,10 @@ void uiCreate(UiActionHandler handler) {
   createSessionsPage(pages[3]);
   createContextPage(pages[4]);
   lv_obj_add_event_cb(tileview, updatePageDots, LV_EVENT_VALUE_CHANGED, nullptr);
+  lv_obj_clear_flag(tileview, LV_OBJ_FLAG_GESTURE_BUBBLE);  // stop it here
+  lv_obj_add_event_cb(tileview, wrapPages, LV_EVENT_GESTURE, nullptr);
+  // The tileview names no active tile until the first scroll; wrapPages needs it.
+  lv_obj_set_tile(tileview, pages[0], LV_ANIM_OFF);
 
   time_label =
       createLabel(screen, "--/-- --:--", &lv_font_montserrat_14, kMuted);
@@ -528,9 +642,9 @@ void uiCreate(UiActionHandler handler) {
 }
 
 void uiUpdate(const AppState& state, uint32_t elapsed_seconds,
-              uint8_t provider) {
+              uint8_t provider, bool usage_trends) {
   lv_label_set_text(time_label, formatDateTime(state, elapsed_seconds).c_str());
-  updateUsagePage(state, elapsed_seconds, provider);
+  updateUsagePage(state, elapsed_seconds, provider, usage_trends);
 
   const bool linked = state.connection == ConnectionState::kLinked;
   const bool stale = state.connection == ConnectionState::kStale;

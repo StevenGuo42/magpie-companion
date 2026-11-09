@@ -11,6 +11,7 @@ no BLE, so Magpie can run anywhere on the LAN, e.g. in Docker on a VM.
 ```text
 Magpie in Docker  http://<docker-vm>:3425
   ├─ /v1/magpie/quotas
+  ├─ /v1/magpie/quotas/history?days=8
   ├─ /v1/magpie/usage
   └─ /v1/magpie/usage/requests?limit=1&via=through
             ^
@@ -24,17 +25,22 @@ Magpie in Docker  http://<docker-vm>:3425
 | Overview | Usage | Requests |
 |---|---|---|
 | ![Overview](docs/screens/overview.png) | ![Usage](docs/screens/usage.png) | ![Requests](docs/screens/requests.png) |
-| **Sessions** | **Context** | |
-| ![Sessions](docs/screens/sessions.png) | ![Context](docs/screens/context.png) | |
+| **Sessions** | **Context** | **Usage (bars)** |
+| ![Sessions](docs/screens/sessions.png) | ![Context](docs/screens/context.png) | ![Usage as bars](docs/screens/usage-bars.png) |
 
 Rendered from the firmware's own UI code with sample data
 (`tools/screenshot/build.sh` regenerates them).
 
 - **Overview**: success rate, calls, errors, lowest remaining quota (today)
-- **Usage**: one account's quota windows (5 hours, 7 days, ...) with % left
-  and time to reset. Tap the account name at the top right for the next one;
-  the choice is remembered. Accounts without a percentage quota (prepaid
-  balances such as OpenRouter) aren't listed.
+- **Usage**: one account's quota windows (5 hours, 7 days, ...) with % left,
+  time to reset and a trend over the current cycle: the solid line is % left
+  as Magpie read it (100% assumed at the start, as Magpie may first read it
+  hours later), the dashed one even use (100% at the start, 0% at the
+  reset). Below the dashed line means ahead of pace. Tap the page to switch
+  between these trends and plain bars of % left, or the account name at the
+  top right for the next account; both choices are remembered. Accounts
+  without a percentage quota (prepaid balances such as OpenRouter) aren't
+  listed.
 - **Requests**: latest model, status, latency, average TTFT, today's tokens
 - **Sessions**: 30-day sessions, total tokens, estimated cost, top model
 - **Context**: cache hit rate and the input/output/cache/reasoning token mix
@@ -105,19 +111,20 @@ release it after two seconds, and retry.
 | Position | Button | Action |
 |---|---|---|
 | Left | BOOT / GPIO0 | Short press toggles the screen; hold 3 seconds to start WPS |
-| Center | PWR / AXP2101 | Hold 6 seconds to cut power |
+| Center | PWR / AXP2101 | Hold 4 seconds to cut power |
 | Right | IO18 | Short press cycles pages; hold 1 second for quick actions (Refresh, Rotate screen) |
 
 **Rotate screen** turns the picture (and touch) a quarter turn each time;
 the rotation is remembered.
 
-Swipe left or right to switch pages. Touch or the right button wakes the
-screen, which sleeps after 15 seconds idle. While asleep it lights up for
+Swipe left or right to switch pages; past the last page comes the first,
+and the other way round. Touch or the right button wakes the
+screen (a waking touch does nothing else), which sleeps after 15 seconds idle. While asleep it lights up for
 10 seconds every 10 minutes. Polling continues while it's off. To spare the
 AMOLED, the background is true black and each wake shifts the picture by up
 to 3 px (9 positions), so static parts don't sit on the same pixels.
 
-Colors: quota (Usage bars, LOWEST QUOTA) is green from 30% left, amber from
+Colors: quota (Usage bars and trends, LOWEST QUOTA) is green from 30% left, amber from
 10%, red below; the success ring is green from 95%, amber from 80%, red below.
 The Usage page leaves out a 5-hour window that hasn't been used (100% left).
 

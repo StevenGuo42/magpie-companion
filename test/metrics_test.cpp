@@ -13,6 +13,7 @@ int main() {
   JsonDocument quotas;
   JsonDocument usage;
   JsonDocument requests;
+  JsonDocument history;
   deserializeJson(quotas, R"({"data":[
     {"provider":"claude","name":"Claude Code","windows":[
       {"name":"5 hours","remaining":100},
@@ -36,7 +37,24 @@ int main() {
                   R"({"rows":[{"served":"","model":"gpt-5.6-sol","status":200,"ms":9876}]})");
 
   AppState state;
-  buildAppState(quotas, usage, requests, state);
+  // Another account's line, a reading without its cycle and a cycle last
+  // read a minute early (04:59 to 09:59, as Claude's drift): only this
+  // cycle's readings count, latest per step. The past cycle's last reading
+  // (04:59:30) falls after that early start but isn't this cycle's.
+  // Nothing of this cycle read at its start: 100% left is assumed there.
+  deserializeJson(history, R"({"data":[
+    {"provider":"codex","user":"someone-else","lines":[{"name":"5 hours","points":[
+      {"at":"2027-01-15T06:00:00Z","left":1,"start":"2027-01-15T05:00:00Z",
+       "resetsAt":"2027-01-15T10:00:00Z"}]}]},
+    {"provider":"codex","lines":[
+      {"name":"7 days","points":[]},
+      {"name":"5 hours","points":[
+        {"at":"2027-01-15T04:59:30Z","left":10,"start":"2027-01-15T00:00:00Z",
+         "resetsAt":"2027-01-15T05:00:00Z"},
+        {"at":"2027-01-15T07:30:00Z","left":60},
+        {"at":"2027-01-15T07:31:00Z","left":42.4,"start":"2027-01-15T04:59:00Z",
+         "resetsAt":"2027-01-15T09:59:00Z"}]}]}]})");
+  buildAppState(quotas, usage, requests, history, state);
   assert(state.remaining_percent == 42);
   assert(state.tokens_today == 155);
   assert(state.calls_today == 7);
@@ -65,6 +83,19 @@ int main() {
   assert(state.providers[1].windows[0].remaining_percent == 42);
   assert(state.providers[1].windows[0].resets_at == 1800007200ULL);
 
+  // Trends: 48 steps over the 5-hour cycle; the assumed 100% holds until
+  // 07:30 and 07:31, which share step 24.
+  const uint8_t* trend = state.providers[1].windows[0].trend;
+  for (int i = 0; i < 24; ++i) {
+    assert(trend[i] == 100);
+  }
+  assert(trend[24] == 42);
+  for (int i = 25; i < kTrendPoints; ++i) {
+    assert(trend[i] == kNoReading);
+  }
+  // No reset time, no cycle to chart.
+  assert(state.providers[0].windows[0].trend[0] == kNoReading);
+
   assert(unixSeconds("2026-11-09T07:00:00.123456789+08:00") == 1794178800ULL);
   assert(unixSeconds("2024-02-29T23:59:59-05:30") == 1709270999ULL);
   assert(unixSeconds("2026-11-09 07:00:00") == 0);
@@ -72,7 +103,7 @@ int main() {
 
   JsonDocument empty;
   AppState blank;
-  buildAppState(empty, empty, empty, blank);
+  buildAppState(empty, empty, empty, empty, blank);
   assert(blank.remaining_percent == 100);
   assert(blank.tokens_today == 0);
   assert(blank.success_permille == 1000);

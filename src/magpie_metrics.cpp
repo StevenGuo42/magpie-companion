@@ -63,6 +63,67 @@ uint8_t percent(double value) {
   return static_cast<uint8_t>(std::clamp<long>(lround(value), 0, 100));
 }
 
+// The readings of one account's window: same provider, account and name.
+JsonArrayConst historyPoints(const JsonDocument& history,
+                             JsonVariantConst provider, const char* window) {
+  for (JsonVariantConst account : history["data"].as<JsonArrayConst>()) {
+    if (strcmp(account["provider"] | "", provider["provider"] | "") != 0 ||
+        strcmp(account["user"] | "", provider["user"] | "") != 0) {
+      continue;
+    }
+    for (JsonVariantConst line : account["lines"].as<JsonArrayConst>()) {
+      if (strcmp(line["name"] | "", window) == 0) {
+        return line["points"];
+      }
+    }
+  }
+  return JsonArrayConst();
+}
+
+// Spreads the readings of the cycle that resets at resets_at over trend, each
+// held until the next. Points come oldest first.
+void fillTrend(JsonArrayConst points, uint64_t resets_at, uint8_t* trend) {
+  std::fill(trend, trend + kTrendPoints, kNoReading);
+  if (resets_at == 0) {
+    return;
+  }
+  // A minute's slack: some vendors' reset times drift between reads.
+  auto this_cycle = [resets_at](JsonVariantConst point) {
+    const uint64_t reset = unixSeconds(point["resetsAt"] | "");
+    return reset + 60 >= resets_at && reset <= resets_at + 60;
+  };
+  uint64_t start = 0;
+  for (JsonVariantConst point : points) {
+    if (this_cycle(point)) {
+      start = unixSeconds(point["start"] | "");
+    }
+  }
+  if (start == 0 || start >= resets_at) {
+    return;
+  }
+  const uint64_t cycle = resets_at - start;
+  // Magpie may first read a quota hours after it resets: a cycle is assumed
+  // to start with all of it left, unless a reading at its start says otherwise.
+  trend[0] = 100;
+  int last = 0;
+  for (JsonVariantConst point : points) {
+    const uint64_t at = unixSeconds(point["at"] | "");
+    // With the start drifting, the last reading of the cycle before can
+    // fall after it: a reading that names its cycle must name this one.
+    if (at < start || at > resets_at || !point["left"].is<double>() ||
+        (!point["resetsAt"].isNull() && !this_cycle(point))) {
+      continue;
+    }
+    const int index = static_cast<int>(
+        ((at - start) * (kTrendPoints - 1) + cycle / 2) / cycle);
+    for (int i = last + 1; i < index; ++i) {
+      trend[i] = trend[last];
+    }
+    trend[index] = percent(point["left"].as<double>());
+    last = std::max(last, index);
+  }
+}
+
 }  // namespace
 
 uint64_t unixSeconds(const char* text) {
@@ -99,7 +160,8 @@ uint64_t unixSeconds(const char* text) {
 }
 
 void buildAppState(const JsonDocument& quotas, const JsonDocument& usage,
-                   const JsonDocument& requests, AppState& state) {
+                   const JsonDocument& requests, const JsonDocument& history,
+                   AppState& state) {
   // The most constrained limited window across every account; 100 if none.
   // Accounts with a percentage window are also listed for the Usage page.
   double lowest = 100;
@@ -125,6 +187,8 @@ void buildAppState(const JsonDocument& quotas, const JsonDocument& usage,
         copyAscii(slot.name, sizeof(slot.name), window["name"] | "-");
         slot.remaining_percent = percent(window["remaining"].as<double>());
         slot.resets_at = unixSeconds(window["resetsAt"] | "");
+        fillTrend(historyPoints(history, provider, window["name"] | ""),
+                  slot.resets_at, slot.trend);
       }
     }
     if (entry != nullptr && windows > 0) {

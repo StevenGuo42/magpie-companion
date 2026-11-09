@@ -32,11 +32,18 @@ void run(uint32_t ms) {
   }
 }
 
+// The trend runs from 100% at the cycle's start to left now, using up faster
+// as it goes; the rest of the cycle is still to come.
 void setWindow(QuotaWindow& window, const char* name, uint8_t left,
-               uint64_t resets_at) {
+               uint64_t now, uint32_t resets_in, uint32_t cycle) {
   snprintf(window.name, sizeof(window.name), "%s", name);
   window.remaining_percent = left;
-  window.resets_at = resets_at;
+  window.resets_at = now + resets_in;
+  const int current = (cycle - resets_in) * (kTrendPoints - 1) / cycle;
+  for (int i = 0; i < kTrendPoints; ++i) {
+    window.trend[i] = i > current ? kNoReading
+                                  : 100 - (100 - left) * i * i / (current * current);
+  }
 }
 
 // Made-up but plausible figures, so no one's real usage is published.
@@ -73,13 +80,16 @@ AppState sampleState() {
   ProviderQuota& claude = state.providers[0];
   snprintf(claude.name, sizeof(claude.name), "Claude Code");
   claude.window_count = 3;
-  setWindow(claude.windows[0], "5 hours", 21, state.unix_time + 2 * 3600 + 14 * 60);
-  setWindow(claude.windows[1], "7 days", 54, state.unix_time + 9 * 3600 + 36 * 60);
-  setWindow(claude.windows[2], "7 days - Fable", 8, state.unix_time + 9 * 3600 + 36 * 60);
+  constexpr uint32_t kFiveHours = 5 * 3600;
+  constexpr uint32_t kWeek = 7 * 86400;
+  const uint64_t now = state.unix_time;
+  setWindow(claude.windows[0], "5 hours", 21, now, 2 * 3600 + 14 * 60, kFiveHours);
+  setWindow(claude.windows[1], "7 days", 54, now, 2 * 86400 + 9 * 3600, kWeek);
+  setWindow(claude.windows[2], "7 days - Fable", 8, now, 2 * 86400 + 9 * 3600, kWeek);
   ProviderQuota& codex = state.providers[1];
   snprintf(codex.name, sizeof(codex.name), "Codex");
   codex.window_count = 1;
-  setWindow(codex.windows[0], "7 days", 91, state.unix_time + 3 * 86400 + 5 * 3600);
+  setWindow(codex.windows[0], "7 days", 91, now, 3 * 86400 + 5 * 3600, kWeek);
   return state;
 }
 
@@ -122,7 +132,7 @@ int main(int argc, char** argv) {
 
   uiCreate([](UiAction) {});
   const AppState state = sampleState();
-  uiUpdate(state, 0, 0);
+  uiUpdate(state, 0, 0, true);
   uiUpdateBattery(86, false);
 
   // The order of the pages in ui.cpp.
@@ -134,6 +144,15 @@ int main(int argc, char** argv) {
     run(1000);  // let the page slide in
     if (!save(argv[1], pages[i])) {
       return 1;
+    }
+    if (strcmp(pages[i], "usage") == 0) {  // and its other view, then back
+      uiUpdate(state, 0, 0, false);
+      run(100);
+      const bool saved = save(argv[1], "usage-bars");
+      uiUpdate(state, 0, 0, true);
+      if (!saved) {
+        return 1;
+      }
     }
   }
   return 0;

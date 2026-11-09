@@ -59,11 +59,12 @@ bool screen_on = true;
 bool power_ready = false;
 
 // Kept across reboots: the screen's rotation (0-3, quarter turns) and the
-// Usage page's account.
+// Usage page's account and view.
 Preferences settings;
 lv_disp_t* lvgl_display = nullptr;
 char selected_provider[24] = "";
 uint8_t provider_index = 0;
+bool usage_trends = true;
 
 struct ButtonState {
   int pin;
@@ -117,6 +118,8 @@ void updateTouchWake() {
   Serial.println("[display] wake by touch");
   setScreenOn(true);
   last_activity_ms = millis();
+  // The waking finger may still be down: it mustn't tap what's under it.
+  lv_indev_wait_release(lv_indev_get_next(nullptr));
 }
 
 void displayFlush(lv_disp_drv_t* driver, const lv_area_t* area,
@@ -153,6 +156,11 @@ void roundDisplayArea(lv_disp_drv_t*, lv_area_t* area) {
 }
 
 void readTouch(lv_indev_drv_t*, lv_indev_data_t* data) {
+  // A touch on the dark screen is left to updateTouchWake: it only wakes.
+  if (!screen_on) {
+    data->state = LV_INDEV_STATE_REL;
+    return;
+  }
   consumeTouchInterrupt();
   const uint8_t points =
       touch.getPoint(touch_x, touch_y, touch.getSupportTouchPoint());
@@ -193,6 +201,11 @@ void handleUiAction(UiAction action) {
         last_ui_refresh_ms = millis() - kUiRefreshMs;  // redraw now
       }
       return;
+    case UiAction::kToggleUsageView:
+      usage_trends = !usage_trends;
+      settings.putBool("trends", usage_trends);
+      last_ui_refresh_ms = millis() - kUiRefreshMs;  // redraw now
+      return;
     case UiAction::kRotate: {
       const uint8_t rotation = (settings.getUChar("rotation", 0) + 1) % 4;
       settings.putUChar("rotation", rotation);
@@ -218,13 +231,13 @@ bool initPower() {
   }
 
   power.setPowerKeyPressOnTime(XPOWERS_POWERON_128MS);
-  power.setPowerKeyPressOffTime(XPOWERS_POWEROFF_6S);
+  power.setPowerKeyPressOffTime(XPOWERS_POWEROFF_4S);  // the PMU's shortest
   power.enableLongPressShutdown();
   power.setLongPressPowerOFF();
   power.setChargeTargetVoltage(3);
   power.enableBattDetection();
   power.enableBattVoltageMeasure();
-  Serial.println("[pmu] long-press shutdown configured: 6 seconds");
+  Serial.println("[pmu] long-press shutdown configured: 4 seconds");
   return true;
 }
 
@@ -297,7 +310,7 @@ bool initLvgl() {
 
   uiCreate(handleUiAction);
   state_received_at_ms = millis();
-  uiUpdate(app_state, 0, 0);
+  uiUpdate(app_state, 0, 0, usage_trends);
   return true;
 }
 
@@ -380,14 +393,14 @@ void refreshUi() {
   }
   last_ui_refresh_ms = now;
   const uint32_t state_age_seconds = (now - state_received_at_ms) / 1000UL;
-  uiUpdate(app_state, state_age_seconds, selectedProvider());
+  uiUpdate(app_state, state_age_seconds, selectedProvider(), usage_trends);
   if (power_ready) {
     uiUpdateBattery(power.getBatteryPercent(), power.isCharging());
   }
 }
 
 void updateNet() {
-  AppState received_state;
+  static AppState received_state;  // ~2.5 KB: off the loop task's stack
   if (netTakeState(received_state)) {
     app_state = received_state;
     state_received_at_ms = millis();
@@ -424,6 +437,7 @@ void setup() {
 
   settings.begin("display");
   settings.getString("provider", selected_provider, sizeof(selected_provider));
+  usage_trends = settings.getBool("trends", true);
   power_ready = initPower();
   const bool display_ok = initDisplay();
   const bool touch_ok = initTouch();

@@ -12,10 +12,15 @@ enum class ConnectionState : uint8_t {
 
 constexpr uint8_t kMaxProviders = 6;
 constexpr uint8_t kMaxWindows = 4;
+constexpr uint8_t kTrendPoints = 48;
+constexpr uint8_t kNoReading = 0xFF;
 
 struct QuotaWindow {
   char name[24];
   uint8_t remaining_percent;
+  // Percent left at kTrendPoints even steps from the cycle's start to its
+  // reset; kNoReading where there's no reading (yet).
+  uint8_t trend[kTrendPoints];
   uint64_t resets_at;  // Unix seconds, 0 if unknown
 };
 

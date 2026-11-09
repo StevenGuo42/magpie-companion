@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 #include <esp_wifi.h>
 #include <esp_wps.h>
 #include <time.h>
@@ -29,6 +30,20 @@ TaskHandle_t poll_task = nullptr;
 volatile bool poll_failed = false;
 volatile bool wps_active = false;
 int last_failure = 0;
+
+// The quota history holds every reading of the past days: kept out of
+// internal RAM.
+struct SpiRamAllocator : ArduinoJson::Allocator {
+  void* allocate(size_t size) override {
+    return heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
+  }
+  void deallocate(void* pointer) override {
+    heap_caps_free(pointer);
+  }
+  void* reallocate(void* pointer, size_t size) override {
+    return heap_caps_realloc(pointer, size, MALLOC_CAP_SPIRAM);
+  }
+};
 
 void post(const char* text) {
   NetMessage message{};
@@ -124,9 +139,11 @@ void poll() {
   static JsonDocument quotas_filter;
   static JsonDocument usage_filter;
   static JsonDocument requests_filter;
+  static JsonDocument history_filter;
   if (quotas_filter.isNull()) {
-    quotas_filter["data"][0]["name"] = true;
-    quotas_filter["data"][0]["provider"] = true;
+    for (const char* key : {"name", "provider", "user"}) {
+      quotas_filter["data"][0][key] = true;
+    }
     for (const char* key : {"name", "remaining", "resetsAt", "unlimited",
                             "text", "balance"}) {
       quotas_filter["data"][0]["windows"][0][key] = true;
@@ -147,11 +164,19 @@ void poll() {
                             "error"}) {
       requests_filter["rows"][0][key] = true;
     }
+    history_filter["data"][0]["provider"] = true;
+    history_filter["data"][0]["user"] = true;
+    history_filter["data"][0]["lines"][0]["name"] = true;
+    for (const char* key : {"at", "left", "start", "resetsAt"}) {
+      history_filter["data"][0]["lines"][0]["points"][0][key] = true;
+    }
   }
 
+  static SpiRamAllocator spi_ram;
   JsonDocument quotas;
   JsonDocument usage;
   JsonDocument requests;
+  JsonDocument history(&spi_ram);
   int status = getJson("/v1/magpie/quotas", quotas_filter, quotas);
   if (status == HTTP_CODE_OK) {
     status = getJson("/v1/magpie/usage", usage_filter, usage);
@@ -166,9 +191,15 @@ void poll() {
     reportFailure(status);
     return;
   }
+  // Optional: without it (an older Magpie) the Usage page has no trends.
+  // shortcut: 8 days covers 7-day windows; longer ones start mid-cycle.
+  if (getJson("/v1/magpie/quotas/history?days=8", history_filter, history) !=
+      HTTP_CODE_OK) {
+    history.clear();
+  }
 
   AppState state;
-  buildAppState(quotas, usage, requests, state);
+  buildAppState(quotas, usage, requests, history, state);
   const time_t now = time(nullptr);
   state.time_valid = now > kClockSetAfter;
   if (state.time_valid) {
@@ -222,7 +253,8 @@ bool netBegin() {
   }
   configTzTime(TIMEZONE, "pool.ntp.org", "time.google.com");
 
-  if (xTaskCreate(pollLoop, "magpie_poll", 8192, nullptr, 1, &poll_task) !=
+  // Room for an AppState (~2.5 KB with trends) on top of the HTTP and JSON work.
+  if (xTaskCreate(pollLoop, "magpie_poll", 12288, nullptr, 1, &poll_task) !=
       pdPASS) {
     Serial.println("[net] failed to start poll task");
     return false;
