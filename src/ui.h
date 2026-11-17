@@ -17,7 +17,8 @@ void uiCreate(UiActionHandler action_handler);
 // that page charts each window's cycle instead of a bar of what's left.
 void uiUpdate(const AppState& state, uint32_t elapsed_seconds,
               uint8_t provider, bool usage_trends);
-void uiUpdateBattery(int percent, bool charging);
+// percent: 0-100, or -1 with no battery (then only a plug is shown).
+void uiUpdateBattery(int percent, bool plugged_in);
 void uiCyclePage();
 void uiShowQuickActions();
 void uiShowToast(const char* text);

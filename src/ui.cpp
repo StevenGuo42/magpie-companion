@@ -37,6 +37,8 @@ lv_obj_t* pages[kPageCount] = {};
 lv_obj_t* page_dots[kPageCount] = {};
 lv_obj_t* time_label = nullptr;
 lv_obj_t* connection_label = nullptr;
+lv_obj_t* power_row = nullptr;
+lv_obj_t* plug_icon = nullptr;
 lv_obj_t* battery_label = nullptr;
 
 lv_obj_t* success_arc = nullptr;
@@ -80,6 +82,7 @@ lv_obj_t* usage_empty_label = nullptr;
 UsageRow usage_rows[kMaxWindows] = {};
 
 lv_obj_t* quick_actions_overlay = nullptr;
+lv_obj_t* help_panel = nullptr;
 lv_obj_t* toast = nullptr;
 lv_timer_t* toast_timer = nullptr;
 
@@ -209,22 +212,40 @@ void dispatchOverlayAction(lv_event_t* event) {
   dispatchAction(event);
 }
 
-void createActionButton(lv_obj_t* parent, const char* text, int y,
-                        UiAction action) {
+void showHelp(lv_event_t*) {
+  lv_obj_clear_flag(help_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+void closeHelp(lv_event_t*) {
+  lv_obj_add_flag(help_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+// primary: green-edged; otherwise a dim outline, as for CANCEL.
+void createMenuButton(lv_obj_t* parent, const char* text, int y,
+                      lv_event_cb_t on_click, void* user_data = nullptr,
+                      bool primary = true) {
   lv_obj_t* button = lv_btn_create(parent);
   lv_obj_set_pos(button, 50, y);
   lv_obj_set_size(button, 350, 58);
   lv_obj_set_style_radius(button, 10, LV_PART_MAIN);
   lv_obj_set_style_bg_color(button, color(kPanel), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_border_color(button, color(kGreen), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(button, primary ? LV_OPA_COVER : LV_OPA_TRANSP,
+                          LV_PART_MAIN);
+  lv_obj_set_style_border_color(button, color(primary ? kGreen : kDivider),
+                                LV_PART_MAIN);
   lv_obj_set_style_border_width(button, 1, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
-  lv_obj_add_event_cb(button, dispatchOverlayAction, LV_EVENT_CLICKED,
-                      reinterpret_cast<void*>(static_cast<uintptr_t>(action)));
+  lv_obj_add_event_cb(button, on_click, LV_EVENT_CLICKED, user_data);
 
-  lv_obj_t* label = createLabel(button, text, &lv_font_montserrat_18, kWhite);
+  lv_obj_t* label = createLabel(button, text, &lv_font_montserrat_18,
+                                primary ? kWhite : kMuted);
   lv_obj_center(label);
+}
+
+void createActionButton(lv_obj_t* parent, const char* text, int y,
+                        UiAction action) {
+  createMenuButton(parent, text, y, dispatchOverlayAction,
+                   reinterpret_cast<void*>(static_cast<uintptr_t>(action)));
 }
 
 void hideToast(lv_timer_t*) {
@@ -595,10 +616,38 @@ void uiCreate(UiActionHandler handler) {
     lv_obj_set_style_bg_opa(page_dots[i],
                             i == 0 ? LV_OPA_COVER : LV_OPA_50, LV_PART_MAIN);
   }
-  battery_label =
-      createLabel(screen, "BAT --%", &lv_font_montserrat_14, kMuted);
-  lv_obj_align(battery_label, LV_ALIGN_BOTTOM_RIGHT, -20, -13);
-  lv_obj_add_flag(battery_label, LV_OBJ_FLAG_HIDDEN);
+  // Bottom right: [plug] [battery] 86%. The flex row skips hidden parts.
+  power_row = lv_obj_create(screen);
+  lv_obj_remove_style_all(power_row);
+  lv_obj_set_size(power_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(power_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(power_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(power_row, 6, LV_PART_MAIN);
+  lv_obj_align(power_row, LV_ALIGN_BOTTOM_RIGHT, -20, -13);
+  lv_obj_add_flag(power_row, LV_OBJ_FLAG_HIDDEN);
+
+  // LVGL's symbol font has no plug, so it's drawn: 2 prongs, body, cord.
+  plug_icon = lv_obj_create(power_row);
+  lv_obj_remove_style_all(plug_icon);
+  lv_obj_set_size(plug_icon, 10, 15);
+  const lv_area_t plug_parts[] = {
+      {2, 0, 3, 3}, {6, 0, 7, 3}, {0, 4, 9, 10}, {4, 11, 5, 14}};
+  for (const lv_area_t& area : plug_parts) {
+    lv_obj_t* part = lv_obj_create(plug_icon);
+    lv_obj_remove_style_all(part);
+    lv_obj_set_pos(part, area.x1, area.y1);
+    lv_obj_set_size(part, lv_area_get_width(&area), lv_area_get_height(&area));
+    lv_obj_set_style_radius(part, 2, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(part, color(kBlue), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(part, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_clear_flag(part, LV_OBJ_FLAG_CLICKABLE);
+  }
+  // Swipes and taps in the corner go through to the pages.
+  lv_obj_clear_flag(power_row, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(plug_icon, LV_OBJ_FLAG_CLICKABLE);
+
+  battery_label = createLabel(power_row, "", &lv_font_montserrat_14, kMuted);
 
   quick_actions_overlay = lv_obj_create(screen);
   lv_obj_set_size(quick_actions_overlay, 480, 480);
@@ -617,18 +666,36 @@ void uiCreate(UiActionHandler handler) {
                      UiAction::kRefresh);
   createActionButton(quick_actions_overlay, "ROTATE SCREEN", 203,
                      UiAction::kRotate);
-  lv_obj_t* cancel = lv_btn_create(quick_actions_overlay);
-  lv_obj_set_pos(cancel, 50, 276);
-  lv_obj_set_size(cancel, 350, 58);
-  lv_obj_set_style_radius(cancel, 10, LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(cancel, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_color(cancel, color(kDivider), LV_PART_MAIN);
-  lv_obj_set_style_border_width(cancel, 1, LV_PART_MAIN);
-  lv_obj_set_style_shadow_width(cancel, 0, LV_PART_MAIN);
-  lv_obj_add_event_cb(cancel, closeOverlay, LV_EVENT_CLICKED, nullptr);
-  lv_obj_t* cancel_label =
-      createLabel(cancel, "CANCEL", &lv_font_montserrat_18, kMuted);
-  lv_obj_center(cancel_label);
+  createMenuButton(quick_actions_overlay, "BUTTON HELP", 276, showHelp);
+  createMenuButton(quick_actions_overlay, "CANCEL", 349, closeOverlay, nullptr,
+                   false);
+
+  // Covers the menu (and takes its taps) until BACK.
+  help_panel = lv_obj_create(quick_actions_overlay);
+  lv_obj_remove_style_all(help_panel);
+  lv_obj_set_size(help_panel, 480, 480);
+  lv_obj_set_style_bg_color(help_panel, color(0x000000), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(help_panel, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_t* help_title =
+      createLabel(help_panel, "BUTTONS", &lv_font_montserrat_18, kMuted);
+  lv_obj_align(help_title, LV_ALIGN_TOP_MID, 0, 60);
+  // Keep in step with the README's Controls table and main.cpp's timings.
+  const char* const help[][2] = {
+      {"LEFT  (BOOT)", "Press: screen on / off\nHold 3 s: Wi-Fi setup (WPS)"},
+      {"CENTER  (PWR)", "Press: turn on\nHold 4 s: turn off"},
+      {"RIGHT", "Press: next page\nHold 1 s: this menu"},
+  };
+  for (size_t i = 0; i < 3; ++i) {
+    const lv_coord_t y = 105 + static_cast<lv_coord_t>(i) * 82;
+    lv_obj_set_pos(
+        createLabel(help_panel, help[i][0], &lv_font_montserrat_18, kGreen), 50,
+        y);
+    lv_obj_set_pos(
+        createLabel(help_panel, help[i][1], &lv_font_montserrat_14, kWhite), 50,
+        y + 26);
+  }
+  createMenuButton(help_panel, "BACK", 360, closeHelp, nullptr, false);
+  lv_obj_add_flag(help_panel, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(quick_actions_overlay, LV_OBJ_FLAG_HIDDEN);
 
   toast = createLabel(screen, "", &lv_font_montserrat_14, kWhite);
@@ -747,21 +814,34 @@ void uiUpdate(const AppState& state, uint32_t elapsed_seconds,
   }
 }
 
-void uiUpdateBattery(int percent, bool charging) {
-  if (percent < 0 || percent > 100) {
+void uiUpdateBattery(int percent, bool plugged_in) {
+  const bool has_battery = percent >= 0 && percent <= 100;
+  if (has_battery) {
+    // 0-12% empty, 13-37 one bar, ... 88-100 full.
+    static const char* const levels[] = {
+        LV_SYMBOL_BATTERY_EMPTY, LV_SYMBOL_BATTERY_1, LV_SYMBOL_BATTERY_2,
+        LV_SYMBOL_BATTERY_3, LV_SYMBOL_BATTERY_FULL};
+    lv_label_set_text_fmt(battery_label, "%s %d%%", levels[(percent + 12) / 25],
+                          percent);
+    lv_obj_set_style_text_color(
+        battery_label,
+        color(plugged_in ? kBlue : (percent < 20 ? kAmber : kMuted)),
+        LV_PART_MAIN);
+    lv_obj_clear_flag(battery_label, LV_OBJ_FLAG_HIDDEN);
+  } else {
     lv_obj_add_flag(battery_label, LV_OBJ_FLAG_HIDDEN);
-    return;
   }
-  lv_label_set_text_fmt(battery_label, charging ? "CHG %d%%" : "BAT %d%%",
-                        percent);
-  lv_obj_set_style_text_color(
-      battery_label,
-      color(charging ? kBlue : (percent < 20 ? kAmber : kMuted)), LV_PART_MAIN);
-  lv_obj_clear_flag(battery_label, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_align(battery_label, LV_ALIGN_BOTTOM_RIGHT, -20, -13);
+  // No battery means it runs on the plug.
+  if (plugged_in || !has_battery) {
+    lv_obj_clear_flag(plug_icon, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(plug_icon, LV_OBJ_FLAG_HIDDEN);
+  }
+  lv_obj_clear_flag(power_row, LV_OBJ_FLAG_HIDDEN);
 }
 
 void uiShowQuickActions() {
+  lv_obj_add_flag(help_panel, LV_OBJ_FLAG_HIDDEN);  // opens on the menu
   lv_obj_clear_flag(quick_actions_overlay, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(quick_actions_overlay);
 }

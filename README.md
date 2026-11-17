@@ -112,15 +112,16 @@ release it after two seconds, and retry.
 |---|---|---|
 | Left | BOOT / GPIO0 | Short press toggles the screen; hold 3 seconds to start WPS |
 | Center | PWR / AXP2101 | Hold 4 seconds to cut power |
-| Right | IO18 | Short press cycles pages; hold 1 second for quick actions (Refresh, Rotate screen) |
+| Right | IO18 | Short press cycles pages; hold 1 second for quick actions (Refresh, Rotate screen, Button help) |
 
 **Rotate screen** turns the picture (and touch) a quarter turn each time;
 the rotation is remembered.
 
 Swipe left or right to switch pages; past the last page comes the first,
 and the other way round. Touch or the right button wakes the
-screen (a waking touch does nothing else), which sleeps after 15 seconds idle. While asleep it lights up for
-10 seconds every 10 minutes. Polling continues while it's off. To spare the
+screen (a waking touch does nothing else), which sleeps after 10 seconds idle.
+Moving the board lights it for 5 seconds. While asleep it lights up for
+10 seconds every 5 minutes. Polling continues while it's off. To spare the
 AMOLED, the background is true black and each wake shifts the picture by up
 to 3 px (9 positions), so static parts don't sit on the same pixels.
 

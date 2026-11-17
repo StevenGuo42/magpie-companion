@@ -7,6 +7,7 @@
 #else
 #include <TouchDrvCSTXXX.hpp>
 #endif
+#include <SensorQMI8658.hpp>
 #include <Wire.h>
 #include <XPowersLib.h>
 #include <Preferences.h>
@@ -20,9 +21,21 @@ namespace {
 
 constexpr uint32_t kUiRefreshMs = 1000;
 constexpr uint32_t kScreenOffLvglRefreshMs = 50;
-constexpr uint32_t kIdleScreenTimeoutMs = 15 * 1000;
-constexpr uint32_t kGlanceIntervalMs = 10 * 60 * 1000;
+constexpr uint32_t kIdleScreenTimeoutMs = 10 * 1000;
+constexpr uint32_t kGlanceIntervalMs = 5 * 60 * 1000;
 constexpr uint32_t kGlanceMs = 10 * 1000;
+constexpr uint32_t kMotionWakeMs = 5 * 1000;
+constexpr uint32_t kMotionCheckMs = 100;
+// Pressing the left button to turn the screen off jolts the board.
+constexpr uint32_t kMotionIgnoreMs = 2000;
+// The QMI8658 wake-on-motion threshold, in mg on any axis (1-255).
+// shortcut: set by feel, not measured; raise it if desk knocks wake the
+// screen, lower it if a firm tap on the case doesn't.
+constexpr uint8_t kMotionThresholdMg = 100;
+// Glance and motion wakes are timed off the idle timeout, so can't outlast it.
+static_assert(kGlanceMs <= kIdleScreenTimeoutMs &&
+                  kMotionWakeMs <= kIdleScreenTimeoutMs,
+              "wake longer than idle timeout");
 constexpr uint32_t kDataStaleMs = 60 * 1000;
 constexpr uint32_t kButtonDebounceMs = 35;
 constexpr uint32_t kCodexLongPressMs = 1000;
@@ -40,6 +53,7 @@ Arduino_CO5300* display = new Arduino_CO5300(
 
 TouchDrvCST92xx touch;
 XPowersPMU power;
+SensorQMI8658 imu;
 
 lv_disp_draw_buf_t draw_buffer;
 lv_color_t* draw_buffer_a = nullptr;
@@ -57,6 +71,7 @@ uint32_t last_activity_ms = 0;
 uint32_t screen_off_ms = 0;
 bool screen_on = true;
 bool power_ready = false;
+bool imu_ready = false;
 
 // Kept across reboots: the screen's rotation (0-3, quarter turns) and the
 // Usage page's account and view.
@@ -270,6 +285,44 @@ bool initTouch() {
   return true;
 }
 
+bool initImu() {
+  // Waveshare doesn't document the QMI8658's address strap: try both. No
+  // pins: Wire is already started on the shared bus.
+  if (!imu.begin(Wire, QMI8658_L_SLAVE_ADDRESS) &&
+      !imu.begin(Wire, QMI8658_H_SLAVE_ADDRESS)) {
+    Serial.println("[imu] QMI8658 not found");
+    return false;
+  }
+  // The chip's own wake-on-motion checks every sample, so it catches a tap
+  // far shorter than the 100 ms between our checks.
+  if (imu.configWakeOnMotion(kMotionThresholdMg) != 0) {
+    Serial.println("[imu] wake-on-motion setup failed");
+    return false;
+  }
+  Serial.println("[imu] motion wake on");
+  return true;
+}
+
+// Lights the dark screen for kMotionWakeMs when the chip flagged motion
+// (kMotionThresholdMg) since the last check.
+void updateMotionWake() {
+  static uint32_t last_check_ms = 0;
+  const uint32_t now = millis();
+  if (!imu_ready || now - last_check_ms < kMotionCheckMs) {
+    return;
+  }
+  last_check_ms = now;
+  // Reading clears the flag, so it's read even while lit: motion from then
+  // mustn't wake the screen once it's dark.
+  const bool moved = imu.update() & SensorQMI8658::STATUS1_WOM_MOTION;
+  if (!moved || screen_on || now - screen_off_ms < kMotionIgnoreMs) {
+    return;
+  }
+  Serial.println("[imu] wake by motion");
+  setScreenOn(true);
+  last_activity_ms = now - (kIdleScreenTimeoutMs - kMotionWakeMs);
+}
+
 bool initLvgl() {
   lv_init();
 
@@ -395,7 +448,8 @@ void refreshUi() {
   const uint32_t state_age_seconds = (now - state_received_at_ms) / 1000UL;
   uiUpdate(app_state, state_age_seconds, selectedProvider(), usage_trends);
   if (power_ready) {
-    uiUpdateBattery(power.getBatteryPercent(), power.isCharging());
+    // Plugged in, not just charging: a full battery on USB keeps the plug.
+    uiUpdateBattery(power.getBatteryPercent(), power.isVbusIn());
   }
 }
 
@@ -441,6 +495,7 @@ void setup() {
   power_ready = initPower();
   const bool display_ok = initDisplay();
   const bool touch_ok = initTouch();
+  imu_ready = initImu();
 
   if (!display_ok || !initLvgl()) {
     Serial.println("[fatal] display stack initialization failed");
@@ -453,6 +508,8 @@ void setup() {
     uiShowToast("PMU OFFLINE");
   } else if (!touch_ok) {
     uiShowToast("TOUCH OFFLINE");
+  } else if (!imu_ready) {
+    uiShowToast("MOTION SENSOR OFFLINE");
   }
 
   if (!netBegin()) {
@@ -472,6 +529,7 @@ void setup() {
 void loop() {
   updateButtons();
   updateTouchWake();
+  updateMotionWake();
   updateNet();
   refreshUi();
 
@@ -489,7 +547,7 @@ void loop() {
     setScreenOn(false);
   }
 
-  // A 10-second glance every 10 minutes while asleep; the idle timeout
+  // A 10-second glance every 5 minutes while asleep; the idle timeout
   // above turns it off again.
   if (!screen_on && now - screen_off_ms >= kGlanceIntervalMs) {
     setScreenOn(true);
